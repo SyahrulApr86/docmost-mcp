@@ -55,6 +55,39 @@ async def test_handle_search_docs_empty(mock_client):
     assert "No results found" in result[0].text
 
 @pytest.mark.asyncio
+async def test_handle_list_pages(mock_client):
+    mock_client.list_pages.return_value = [
+        {"id": "page-1", "slugId": "slug-1", "title": "Root", "hasChildren": True}
+    ]
+
+    result = await mcp_server.handle_list_pages(mock_client, "space-1", None, False, 100)
+
+    text = result[0].text
+    assert "Root" in text
+    assert "slug-1" in text
+    assert "page-1" in text
+
+@pytest.mark.asyncio
+async def test_handle_list_pages_recursive(mock_client):
+    mock_client.list_pages.return_value = [
+        {
+            "id": "page-1",
+            "slugId": "slug-1",
+            "title": "Root",
+            "hasChildren": True,
+            "children": [
+                {"id": "page-2", "slugId": "slug-2", "title": "Child", "hasChildren": False}
+            ],
+        }
+    ]
+
+    result = await mcp_server.handle_list_pages(mock_client, "space-1", None, True, 100)
+
+    text = result[0].text
+    assert "Root" in text
+    assert "Child" in text
+
+@pytest.mark.asyncio
 async def test_handle_get_page(mock_client):
     mock_client.get_page.return_value = {
         "title": "API Docs",
@@ -110,6 +143,32 @@ async def test_handle_update_page(mock_client):
     text = result[0].text
     assert "page-1" in text
     assert "Updated" in text
+
+@pytest.mark.asyncio
+async def test_handle_edit_page_section(mock_client):
+    mock_client.edit_page_section.return_value = {
+        "page": {"id": "page-1", "updatedAt": "2026-05-24T00:00:00Z"},
+        "title": "Updated",
+        "page_id": "page-1",
+        "edit_type": "section",
+        "before_dump": "/tmp/before.md",
+        "after_dump": "/tmp/after.md",
+    }
+
+    result = await mcp_server.handle_edit_page_section(
+        mock_client,
+        "page-1",
+        None,
+        None,
+        "Scope",
+        "New body",
+        1
+    )
+    text = result[0].text
+    assert "page-1" in text
+    assert "Updated" in text
+    assert "/tmp/before.md" in text
+    assert "/tmp/after.md" in text
 
 @pytest.mark.asyncio
 async def test_call_tool_dispatch():

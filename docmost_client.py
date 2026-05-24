@@ -5,6 +5,7 @@ Handles authentication, token caching, and API requests.
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timezone, timedelta
@@ -20,6 +21,7 @@ MAX_DUPLICATE_SUFFIX_ATTEMPTS = 10
 DEFAULT_SPACE_CONFLICT_POLICY = "return_existing"
 DEFAULT_DUPLICATE_CONFLICT_POLICY = "auto_suffix"
 DEFAULT_PAGE_CONTENT_FORMAT = "markdown"
+DEFAULT_PAGE_DUMP_DIR = "page_dumps"
 
 
 class DocmostClient:
@@ -195,6 +197,28 @@ class DocmostClient:
         result = self._request("POST", "/api/search", payload)
         return result.get("data", {}).get("items", [])
 
+    def list_pages(
+        self,
+        space_id: str,
+        parent_page_id: Optional[str] = None,
+        recursive: bool = False,
+        limit: int = 100
+    ) -> list[dict]:
+        """
+        List sidebar pages in a space or under a parent page.
+
+        Uses Docmost's cursor-paginated /api/pages/sidebar-pages endpoint.
+        """
+        space_id = self._require_string(space_id, "space_id")
+        if parent_page_id:
+            parent_page_id = self._require_string(parent_page_id, "parent_page_id")
+        limit = self._normalize_limit(limit)
+
+        pages = self._list_sidebar_pages(space_id, parent_page_id, limit)
+        if recursive:
+            pages = self._attach_child_pages(pages, space_id, limit)
+        return pages
+
     def get_page(self, slug_id: str) -> dict:
         """
         Get page content by slugId.
@@ -318,6 +342,66 @@ class DocmostClient:
 
         response.raise_for_status()
         return response.json().get("data", response.json())
+
+    def edit_page_section(
+        self,
+        page_id: str,
+        old_text: Optional[str] = None,
+        new_text: Optional[str] = None,
+        section_heading: Optional[str] = None,
+        section_content: Optional[str] = None,
+        occurrence: int = 1
+    ) -> dict:
+        """
+        Fetch a page, dump Markdown locally, edit a targeted section/snippet, and push the
+        changed Markdown back to Docmost.
+        """
+        page_id = self._require_string(page_id, "page_id")
+        occurrence = self._normalize_occurrence(occurrence)
+
+        if section_heading:
+            section_content = self._require_string(section_content or "", "section_content")
+        else:
+            old_text = self._require_string(old_text or "", "old_text")
+            if new_text is None:
+                raise ValueError("new_text is required.")
+
+        page = self.get_page(page_id)
+        title = page.get("title", "Untitled")
+        markdown = self.prosemirror_to_markdown(page.get("content", {}))
+        before_path = self._dump_page_markdown(page_id, title, markdown, "before")
+
+        if section_heading:
+            updated_markdown = self._replace_markdown_section(
+                markdown,
+                section_heading,
+                section_content or "",
+                occurrence
+            )
+            edit_type = "section"
+        else:
+            updated_markdown = self._replace_markdown_text(
+                markdown,
+                old_text or "",
+                new_text or "",
+                occurrence
+            )
+            edit_type = "text"
+
+        if updated_markdown == markdown:
+            raise ValueError("No content changed.")
+
+        after_path = self._dump_page_markdown(page_id, title, updated_markdown, "after")
+        updated = self.update_page(page_id, content=updated_markdown, mode="replace")
+
+        return {
+            "page": updated,
+            "title": updated.get("title") or title,
+            "page_id": updated.get("id") or page_id,
+            "edit_type": edit_type,
+            "before_dump": str(before_path),
+            "after_dump": str(after_path),
+        }
 
     def duplicate_page(self, page_id: str, new_title: Optional[str] = None) -> dict:
         """Duplicate a page (recursive) with optional title override."""
@@ -823,6 +907,128 @@ class DocmostClient:
         if mode == "prepend":
             return f"{new_content.rstrip()}\n\n{existing.lstrip()}"
         return new_content
+
+    def _dump_page_markdown(self, page_id: str, title: str, markdown: str, suffix: str) -> Path:
+        dump_dir = self.config.get("page_dump_dir", DEFAULT_PAGE_DUMP_DIR)
+        dump_path = Path(dump_dir)
+        if not dump_path.is_absolute():
+            dump_path = self.config_path.parent / dump_path
+        dump_path.mkdir(parents=True, exist_ok=True)
+
+        safe_title = re.sub(r"[^a-zA-Z0-9._-]+", "-", title).strip("-").lower()[:60]
+        safe_page_id = re.sub(r"[^a-zA-Z0-9._-]+", "-", page_id).strip("-")
+        filename = f"{safe_page_id}-{safe_title or 'page'}-{suffix}.md"
+        output_path = dump_path / filename
+        output_path.write_text(markdown, encoding="utf-8")
+        return output_path
+
+    def _normalize_occurrence(self, occurrence: int) -> int:
+        try:
+            occurrence_int = int(occurrence)
+        except (TypeError, ValueError):
+            raise ValueError("occurrence must be an integer.")
+        if occurrence_int < 1:
+            raise ValueError("occurrence must be >= 1.")
+        return occurrence_int
+
+    def _replace_markdown_text(
+        self,
+        markdown: str,
+        old_text: str,
+        new_text: str,
+        occurrence: int
+    ) -> str:
+        start = -1
+        search_from = 0
+        for _ in range(occurrence):
+            start = markdown.find(old_text, search_from)
+            if start == -1:
+                raise ValueError(f"old_text occurrence {occurrence} not found.")
+            search_from = start + len(old_text)
+        return f"{markdown[:start]}{new_text}{markdown[start + len(old_text):]}"
+
+    def _replace_markdown_section(
+        self,
+        markdown: str,
+        section_heading: str,
+        section_content: str,
+        occurrence: int
+    ) -> str:
+        heading_text = section_heading.strip().lstrip("#").strip()
+        if not heading_text:
+            raise ValueError("section_heading is required.")
+
+        heading_matches = []
+        heading_pattern = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.MULTILINE)
+        for match in heading_pattern.finditer(markdown):
+            if match.group(2).strip() == heading_text:
+                heading_matches.append(match)
+
+        if len(heading_matches) < occurrence:
+            raise ValueError(f"section_heading occurrence {occurrence} not found.")
+
+        match = heading_matches[occurrence - 1]
+        level = len(match.group(1))
+        next_heading_pattern = re.compile(rf"^#{{1,{level}}}[ \t]+.+?[ \t]*$", re.MULTILINE)
+        next_match = next_heading_pattern.search(markdown, match.end())
+        section_end = next_match.start() if next_match else len(markdown)
+
+        replacement = section_content.strip()
+        if replacement:
+            replacement = f"\n\n{replacement}\n\n"
+        else:
+            replacement = "\n\n"
+
+        return f"{markdown[:match.end()]}{replacement}{markdown[section_end:].lstrip()}"
+
+    def _normalize_limit(self, limit: int) -> int:
+        try:
+            limit_int = int(limit)
+        except (TypeError, ValueError):
+            raise ValueError("limit must be an integer.")
+        return max(1, min(100, limit_int))
+
+    def _list_sidebar_pages(
+        self,
+        space_id: str,
+        parent_page_id: Optional[str],
+        limit: int
+    ) -> list[dict]:
+        payload: dict = {"limit": limit}
+        if parent_page_id:
+            payload["pageId"] = parent_page_id
+        else:
+            payload["spaceId"] = space_id
+
+        pages: list[dict] = []
+        cursor = None
+        while True:
+            if cursor:
+                payload["cursor"] = cursor
+            elif "cursor" in payload:
+                del payload["cursor"]
+
+            result = self._request("POST", "/api/pages/sidebar-pages", payload)
+            data = result.get("data", result)
+            pages.extend(data.get("items", []))
+
+            meta = data.get("meta", {})
+            if not meta.get("hasNextPage"):
+                break
+            cursor = meta.get("nextCursor")
+            if not cursor:
+                break
+
+        return pages
+
+    def _attach_child_pages(self, pages: list[dict], space_id: str, limit: int) -> list[dict]:
+        for page in pages:
+            if page.get("hasChildren"):
+                children = self._list_sidebar_pages(space_id, page.get("id"), limit)
+                page["children"] = self._attach_child_pages(children, space_id, limit)
+            else:
+                page["children"] = []
+        return pages
 
     def _copy_title_with_suffix(self, base_title: str, attempt: int) -> str:
         if attempt == 0:

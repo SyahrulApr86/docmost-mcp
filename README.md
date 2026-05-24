@@ -17,11 +17,13 @@ Works with any MCP-compatible client, including:
 | Tool | Description |
 |------|-------------|
 | **list_spaces** | List all available documentation spaces with names, slugs, and IDs |
+| **list_pages** | List root pages in a space, or recursively list a page tree |
 | **search_docs** | Full-text search across all documentation, with optional space filtering |
 | **get_page** | Retrieve full page content converted from ProseMirror JSON to Markdown |
 | **create_space** | Create a new space with optional idempotent behavior |
 | **create_page** | Create a page in a space (Markdown content) |
 | **update_page** | Update page title/content (replace/append/prepend modes) |
+| **edit_page_section** | Fetch page, dump Markdown locally, edit exact text or heading section, then push updated page |
 | **duplicate_page** | Duplicate a page recursively |
 | **move_page** | Move a page within a space or hierarchy |
 | **move_page_to_space** | Move a page to another space |
@@ -85,6 +87,7 @@ Edit `config.json`:
   "password": "your-password",
   "timeout": 30,
   "page_content_format": "markdown",
+  "page_dump_dir": "page_dumps",
   "create_space_conflict_policy": "return_existing",
   "duplicate_page_conflict_policy": "auto_suffix",
   "clear_parent_on_space_move": true
@@ -98,6 +101,7 @@ Edit `config.json`:
 | `password` | Password for Docmost authentication |
 | `timeout` | HTTP request timeout in seconds |
 | `page_content_format` | Page content format for create/update (default: `markdown`) |
+| `page_dump_dir` | Directory for local Markdown before/after dumps created by `edit_page_section` |
 | `create_space_conflict_policy` | `return_existing` or `error` on space name conflict |
 | `duplicate_page_conflict_policy` | `auto_suffix` or `error` on title conflict |
 | `clear_parent_on_space_move` | Clear parent when moving to another space (default: true) |
@@ -218,6 +222,16 @@ Once the MCP server is connected, your AI assistant can use the following tools:
 Show me all available documentation spaces
 ```
 
+### List pages in a space
+
+```
+List all pages in space "SPACE_ID"
+```
+
+```
+List the full page tree in space "SPACE_ID"
+```
+
 ### Search documentation
 
 ```
@@ -254,6 +268,18 @@ Create a page in space "SPACE_ID" titled "Kickoff Notes" with content "# Kickoff
 Append "## Decisions\n- ..." to page "PAGE_ID"
 ```
 
+### Edit one section or snippet
+
+```
+Replace exact text "old sentence" with "new sentence" in page "PAGE_ID"
+```
+
+```
+Replace the section under heading "Decisions" in page "PAGE_ID" with "- Approved launch"
+```
+
+`edit_page_section` fetches the page itself, writes before/after Markdown dumps to `page_dump_dir`, edits only the requested Markdown snippet or heading body locally, then pushes the updated page back to Docmost.
+
 ### Move a page
 
 ```
@@ -274,6 +300,7 @@ Resolve comment "COMMENT_ID" with note "Addressed in revision 3."
 - `create_space`: 409 conflicts return a clear error or the existing space (see `create_space_conflict_policy`).
 - `create_page`: 404 for invalid `space_id`, 400 for invalid `parent_page_id`.
 - `update_page`: 404 when page is missing; append/prepend requires `content`.
+- `edit_page_section`: requires `old_text/new_text` or `section_heading/section_content`; fails if target occurrence is missing.
 - `duplicate_page`: 404 when source page is missing; conflict handling depends on `duplicate_page_conflict_policy`.
 - `move_page`: requires `new_parent_page_id` or `new_position`; rejects circular moves; invalid positions return 400.
 - `create_comment`: 404 when page is missing; 401 if not authorized.

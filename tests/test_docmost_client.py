@@ -124,6 +124,60 @@ def test_search_docs(mock_client, mock_config):
     assert parsed_payload["spaceId"] == "space1"
 
 @responses.activate
+def test_list_pages(mock_client, mock_config):
+    pages_data = {
+        "success": True,
+        "data": {
+            "items": [
+                {"id": "page1", "slugId": "slug1", "title": "Root", "hasChildren": False}
+            ],
+            "meta": {"hasNextPage": False}
+        }
+    }
+    responses.add(
+        responses.POST,
+        f"{mock_config['base_url']}/api/pages/sidebar-pages",
+        status=200,
+        json=pages_data
+    )
+
+    result = mock_client.list_pages("space1")
+
+    assert len(result) == 1
+    assert result[0]["title"] == "Root"
+    req = responses.calls[0].request
+    parsed_payload = json.loads(req.body)
+    assert parsed_payload["spaceId"] == "space1"
+    assert parsed_payload["limit"] == 100
+
+@responses.activate
+def test_list_pages_recursive(mock_client, mock_config):
+    responses.add(
+        responses.POST,
+        f"{mock_config['base_url']}/api/pages/sidebar-pages",
+        status=200,
+        json={"data": {
+            "items": [{"id": "page1", "slugId": "root", "title": "Root", "hasChildren": True}],
+            "meta": {"hasNextPage": False}
+        }}
+    )
+    responses.add(
+        responses.POST,
+        f"{mock_config['base_url']}/api/pages/sidebar-pages",
+        status=200,
+        json={"data": {
+            "items": [{"id": "page2", "slugId": "child", "title": "Child", "hasChildren": False}],
+            "meta": {"hasNextPage": False}
+        }}
+    )
+
+    result = mock_client.list_pages("space1", recursive=True)
+
+    assert result[0]["children"][0]["title"] == "Child"
+    child_payload = json.loads(responses.calls[1].request.body)
+    assert child_payload["pageId"] == "page1"
+
+@responses.activate
 def test_get_page(mock_client, mock_config):
     page_data = {
         "success": True,
@@ -362,3 +416,60 @@ def test_markdown_to_prosemirror():
     # Check bold formatting was parsed
     first_para = pm["content"][0]["content"]
     assert any(item.get("marks") == [{"type": "bold"}] for item in first_para)
+
+@responses.activate
+def test_edit_page_section_exact_text(tmp_path):
+    config = {
+        "base_url": "http://example.docmost.com",
+        "email": "test@example.com",
+        "password": "password123",
+        "timeout": 10,
+        "page_dump_dir": str(tmp_path / "dumps")
+    }
+    config_path = tmp_path / "config.json"
+    token_path = tmp_path / "token.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    token_path.write_text(json.dumps({
+        "token": "fake-jwt-token",
+        "created_at": "2026-12-31T23:59:59Z"
+    }), encoding="utf-8")
+    client = DocmostClient(str(config_path), str(token_path))
+
+    responses.add(
+        responses.POST,
+        f"{config['base_url']}/api/pages/info",
+        status=200,
+        json={"data": {
+            "id": "page1",
+            "title": "Roadmap",
+            "content": {
+                "type": "doc",
+                "content": [
+                    {"type": "paragraph", "content": [{"type": "text", "text": "alpha beta gamma"}]}
+                ]
+            }
+        }}
+    )
+    responses.add(
+        responses.POST,
+        f"{config['base_url']}/api/pages/update",
+        status=200,
+        json={"data": {"id": "page1", "title": "Roadmap", "updatedAt": "2026-05-24T00:00:00Z"}}
+    )
+
+    result = client.edit_page_section("page1", old_text="beta", new_text="BETA")
+
+    assert result["edit_type"] == "text"
+    assert (tmp_path / "dumps" / "page1-roadmap-before.md").read_text(encoding="utf-8") == "alpha beta gamma"
+    assert (tmp_path / "dumps" / "page1-roadmap-after.md").read_text(encoding="utf-8") == "alpha BETA gamma"
+    payload = json.loads(responses.calls[1].request.body)
+    assert payload["content"] == "alpha BETA gamma"
+    assert payload["operation"] == "replace"
+
+def test_replace_markdown_section_preserves_heading():
+    client = DocmostClient()
+    markdown = "# Title\n\n## Scope\n\nold body\n\n## Next\n\nkeep"
+
+    updated = client._replace_markdown_section(markdown, "Scope", "new body", 1)
+
+    assert updated == "# Title\n\n## Scope\n\nnew body\n\n## Next\n\nkeep"

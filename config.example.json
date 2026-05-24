@@ -4,6 +4,7 @@
   "password": "your-password",
   "timeout": 30,
   "page_content_format": "markdown",
+  "page_dump_dir": "page_dumps",
   "create_space_conflict_policy": "return_existing",
   "duplicate_page_conflict_policy": "auto_suffix",
   "clear_parent_on_space_move": true

@@ -1,7 +1,8 @@
 """
 Docmost MCP Server
-Provides 11 tools: list_spaces, search_docs, get_page, create_space, create_page,
-update_page, duplicate_page, move_page, move_page_to_space, create_comment, resolve_comment
+Provides tools: list_spaces, list_pages, search_docs, get_page, create_space, create_page,
+update_page, edit_page_section, duplicate_page, move_page, move_page_to_space,
+create_comment, resolve_comment
 """
 
 import os
@@ -72,6 +73,36 @@ async def list_tools() -> list[Tool]:
                     }
                 },
                 "required": ["query"]
+            }
+        ),
+        Tool(
+            name="list_pages",
+            description="List pages in a Docmost space, or children under a parent page. Supports recursive tree listing.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "space_id": {
+                        "type": "string",
+                        "description": "Space UUID"
+                    },
+                    "parent_page_id": {
+                        "type": "string",
+                        "description": "Optional parent page ID. If omitted, returns root-level pages in the space."
+                    },
+                    "recursive": {
+                        "type": "boolean",
+                        "description": "If true, recursively fetch child pages and return a tree.",
+                        "default": False
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Page size per API call (default 100, max 100).",
+                        "default": 100,
+                        "minimum": 1,
+                        "maximum": 100
+                    }
+                },
+                "required": ["space_id"]
             }
         ),
         Tool(
@@ -155,6 +186,42 @@ async def list_tools() -> list[Tool]:
                         "description": "Content update mode: replace, append, prepend",
                         "enum": ["replace", "append", "prepend"],
                         "default": "replace"
+                    }
+                },
+                "required": ["page_id"]
+            }
+        ),
+        Tool(
+            name="edit_page_section",
+            description="Edit one targeted part of a page. The server fetches full content, dumps before/after Markdown locally, replaces an exact text occurrence or a Markdown heading section, then pushes the page back.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "page_id": {
+                        "type": "string",
+                        "description": "Page ID or slugId"
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact Markdown snippet to replace. Required when section_heading is not provided."
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "Replacement Markdown for old_text. Required when old_text is used."
+                    },
+                    "section_heading": {
+                        "type": "string",
+                        "description": "Markdown heading text to replace the section body under that heading."
+                    },
+                    "section_content": {
+                        "type": "string",
+                        "description": "New Markdown body for the matched heading section. Heading line is preserved."
+                    },
+                    "occurrence": {
+                        "type": "integer",
+                        "description": "Which matching old_text or heading occurrence to edit (1-based).",
+                        "default": 1,
+                        "minimum": 1
                     }
                 },
                 "required": ["page_id"]
@@ -276,6 +343,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             max_results = arguments.get("max_results", 5)
             return await handle_search_docs(client, query, space_id, max_results)
 
+        elif name == "list_pages":
+            space_id = arguments.get("space_id", "")
+            parent_page_id = arguments.get("parent_page_id")
+            recursive = arguments.get("recursive", False)
+            limit = arguments.get("limit", 100)
+            return await handle_list_pages(client, space_id, parent_page_id, recursive, limit)
+
         elif name == "get_page":
             slug_id = arguments.get("slug_id", "")
             return await handle_get_page(client, slug_id)
@@ -298,6 +372,23 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             content = arguments.get("content")
             mode = arguments.get("mode", "replace")
             return await handle_update_page(client, page_id, title, content, mode)
+
+        elif name == "edit_page_section":
+            page_id = arguments.get("page_id", "")
+            old_text = arguments.get("old_text")
+            new_text = arguments.get("new_text")
+            section_heading = arguments.get("section_heading")
+            section_content = arguments.get("section_content")
+            occurrence = arguments.get("occurrence", 1)
+            return await handle_edit_page_section(
+                client,
+                page_id,
+                old_text,
+                new_text,
+                section_heading,
+                section_content,
+                occurrence
+            )
 
         elif name == "duplicate_page":
             page_id = arguments.get("page_id", "")
@@ -401,6 +492,48 @@ async def handle_search_docs(
     lines.append(f"*Use `get_page` with slug_id to get full page content (max_results={max_results}).*")
 
     return [TextContent(type="text", text="\n".join(lines))]
+
+
+async def handle_list_pages(
+    client: DocmostClient,
+    space_id: str,
+    parent_page_id: str | None,
+    recursive: bool = False,
+    limit: int = 100
+) -> list[TextContent]:
+    """Handle list_pages tool."""
+    if not space_id:
+        return [TextContent(type="text", text="Error: space_id is required")]
+
+    pages = client.list_pages(space_id, parent_page_id, recursive, limit)
+    if not pages:
+        return [TextContent(type="text", text="No pages found.")]
+
+    title = "## Pages"
+    if recursive:
+        title = "## Page Tree"
+    lines = [title, ""]
+    lines.extend(_format_pages(pages, recursive=recursive))
+    lines.append("")
+    lines.append(f"*Total top-level returned: {len(pages)} pages*")
+
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+def _format_pages(pages: list[dict], recursive: bool, depth: int = 0) -> list[str]:
+    lines = []
+    indent = "  " * depth
+    for page in pages:
+        title = page.get("title") or "Untitled"
+        slug_id = page.get("slugId", "-")
+        page_id = page.get("id", "-")
+        child_marker = " +" if page.get("hasChildren") else ""
+        lines.append(f"{indent}- {title}{child_marker} — slug `{slug_id}` — id `{page_id}`")
+        if recursive:
+            children = page.get("children", [])
+            if children:
+                lines.extend(_format_pages(children, recursive=True, depth=depth + 1))
+    return lines
 
 
 async def handle_get_page(client: DocmostClient, slug_id: str) -> list[TextContent]:
@@ -518,6 +651,46 @@ async def handle_update_page(
     if updated_at:
         lines.append(f"- **Updated At:** {updated_at}")
     lines.append(f"- **Mode:** {mode}")
+
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+async def handle_edit_page_section(
+    client: DocmostClient,
+    page_id: str,
+    old_text: str | None,
+    new_text: str | None,
+    section_heading: str | None,
+    section_content: str | None,
+    occurrence: int
+) -> list[TextContent]:
+    """Handle edit_page_section tool."""
+    if not page_id:
+        return [TextContent(type="text", text="Error: page_id is required")]
+    if section_heading:
+        if section_content is None:
+            return [TextContent(type="text", text="Error: section_content is required when section_heading is used")]
+    elif not old_text or new_text is None:
+        return [TextContent(type="text", text="Error: old_text and new_text are required unless section_heading is used")]
+
+    result = client.edit_page_section(
+        page_id=page_id,
+        old_text=old_text,
+        new_text=new_text,
+        section_heading=section_heading,
+        section_content=section_content,
+        occurrence=occurrence
+    )
+
+    page = result.get("page", {})
+    lines = ["## Page Section Edited", ""]
+    lines.append(f"- **Page ID:** {result.get('page_id', page_id)}")
+    lines.append(f"- **Title:** {result.get('title', page.get('title', 'Untitled'))}")
+    lines.append(f"- **Edit Type:** {result.get('edit_type', '-')}")
+    lines.append(f"- **Before Dump:** {result.get('before_dump', '-')}")
+    lines.append(f"- **After Dump:** {result.get('after_dump', '-')}")
+    if page.get("updatedAt"):
+        lines.append(f"- **Updated At:** {page.get('updatedAt')}")
 
     return [TextContent(type="text", text="\n".join(lines))]
 
