@@ -35,14 +35,14 @@ def test_login_failure(mock_client, mock_config):
     with pytest.raises(Exception):
         mock_client.login()
 
-def test_is_token_expired_true():
-    client = DocmostClient()
+def test_is_token_expired_true(mock_client):
+    client = mock_client
     # Mocking ancient token
     client.token_created_at = datetime.now(timezone.utc) - timedelta(hours=25)
     assert client._is_token_expired() is True
 
-def test_is_token_expired_false():
-    client = DocmostClient()
+def test_is_token_expired_false(mock_client):
+    client = mock_client
     # Fresh token
     client.token_created_at = datetime.now(timezone.utc) - timedelta(hours=1)
     assert client._is_token_expired() is False
@@ -227,18 +227,18 @@ def test_create_space(mock_client, mock_config):
     assert parsed_payload["name"] == "New Space"
     assert parsed_payload["description"] == "A description"
 
-def test_update_page_invalid_mode():
-    client = DocmostClient()
+def test_update_page_invalid_mode(mock_client):
+    client = mock_client
     with pytest.raises(ValueError, match="mode must be one of: replace, append, prepend"):
         client.update_page("page_id", title="New title", mode="invalid_mode")
 
-def test_update_page_no_title_or_content():
-    client = DocmostClient()
+def test_update_page_no_title_or_content(mock_client):
+    client = mock_client
     with pytest.raises(ValueError, match="At least one of title or content is required."):
         client.update_page("page_id")
 
-def test_create_page_missing_space_id():
-    client = DocmostClient()
+def test_create_page_missing_space_id(mock_client):
+    client = mock_client
     with pytest.raises(ValueError, match="space_id is required."):
         client.create_page("", "Title")
 
@@ -384,8 +384,8 @@ def test_request_forbidden(mock_client, mock_config):
     with pytest.raises(ValueError, match="Permission denied: your account does not have write access"):
         mock_client.create_page("space1", "Title")
 
-def test_prosemirror_to_markdown():
-    client = DocmostClient()
+def test_prosemirror_to_markdown(mock_client):
+    client = mock_client
     content = {
         "type": "doc",
         "content": [
@@ -407,8 +407,8 @@ def test_prosemirror_to_markdown():
     md = client.prosemirror_to_markdown(content)
     assert md == "## Test Heading\n\nHello **world**"
 
-def test_markdown_to_prosemirror():
-    client = DocmostClient()
+def test_markdown_to_prosemirror(mock_client):
+    client = mock_client
     md = "Hello **world**\n\n*test*"
     pm = client.markdown_to_prosemirror(md)
     assert pm["type"] == "doc"
@@ -466,8 +466,8 @@ def test_edit_page_section_exact_text(tmp_path):
     assert payload["content"] == "alpha BETA gamma"
     assert payload["operation"] == "replace"
 
-def test_replace_markdown_section_preserves_heading():
-    client = DocmostClient()
+def test_replace_markdown_section_preserves_heading(mock_client):
+    client = mock_client
     markdown = "# Title\n\n## Scope\n\nold body\n\n## Next\n\nkeep"
 
     updated = client._replace_markdown_section(markdown, "Scope", "new body", 1)
