@@ -2,7 +2,7 @@
 Docmost MCP Server
 Provides tools: list_spaces, list_pages, search_docs, get_page, create_space, create_page,
 update_page, edit_page_section, duplicate_page, move_page, move_page_to_space,
-create_comment, resolve_comment
+create_comment, resolve_comment, upload_file
 """
 
 import os
@@ -324,6 +324,33 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["comment_id"]
             }
+        ),
+        Tool(
+            name="upload_file",
+            description=(
+                "Upload a local file as an attachment to a Docmost page. "
+                "Returns the file ID and URL that can be used to embed the file in page content "
+                "using Markdown syntax: ![alt](/api/files/{id}/{filename}). "
+                "Supports images (PNG, JPG, SVG), PDFs, and other file types."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Absolute or relative local path to the file to upload"
+                    },
+                    "page_id": {
+                        "type": "string",
+                        "description": "Target page ID to attach the file to"
+                    },
+                    "mime_type": {
+                        "type": "string",
+                        "description": "Optional MIME type (e.g. image/png). Auto-detected from file extension if not provided."
+                    }
+                },
+                "required": ["file_path", "page_id"]
+            }
         )
     ]
 
@@ -416,6 +443,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             comment_id = arguments.get("comment_id", "")
             resolution_note = arguments.get("resolution_note")
             return await handle_resolve_comment(client, comment_id, resolution_note)
+
+        elif name == "upload_file":
+            file_path = arguments.get("file_path", "")
+            page_id = arguments.get("page_id", "")
+            mime_type = arguments.get("mime_type")
+            return await handle_upload_file(client, file_path, page_id, mime_type)
 
         else:
             return [TextContent(type="text", text=f"Unknown tool: {name}")]
@@ -818,6 +851,45 @@ async def handle_resolve_comment(
         lines.append(f"- **Resolved By:** {resolved_by}")
     if resolution_note:
         lines.append(f"- **Resolution Note:** {resolution_note}")
+
+    return [TextContent(type="text", text="\n".join(lines))]
+
+
+async def handle_upload_file(
+    client: DocmostClient,
+    file_path: str,
+    page_id: str,
+    mime_type: str | None
+) -> list[TextContent]:
+    """Handle upload_file tool."""
+    if not file_path:
+        return [TextContent(type="text", text="Error: file_path is required")]
+    if not page_id:
+        return [TextContent(type="text", text="Error: page_id is required")]
+
+    result = client.upload_file(file_path, page_id, mime_type)
+
+    file_id = result.get("id", "-")
+    file_name = result.get("fileName", "-")
+    file_size = result.get("fileSize", 0)
+    mime = result.get("mimeType", "-")
+    url = result.get("url", f"/api/files/{file_id}/{file_name}")
+    created_at = result.get("createdAt", "")
+
+    lines = ["## File Uploaded", ""]
+    lines.append(f"- **File ID:** {file_id}")
+    lines.append(f"- **File Name:** {file_name}")
+    lines.append(f"- **Size:** {file_size} bytes")
+    lines.append(f"- **MIME Type:** {mime}")
+    lines.append(f"- **Page ID:** {page_id}")
+    if created_at:
+        lines.append(f"- **Uploaded At:** {created_at}")
+    lines.append("")
+    lines.append("**Embed URL:**")
+    lines.append(f"`{url}`")
+    lines.append("")
+    lines.append("**Markdown embed:**")
+    lines.append(f"`![{file_name}]({url})`")
 
     return [TextContent(type="text", text="\n".join(lines))]
 

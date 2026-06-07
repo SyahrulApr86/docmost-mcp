@@ -169,6 +169,67 @@ class DocmostClient:
 
         return response
 
+    def upload_file(self, file_path: str, page_id: str, mime_type: Optional[str] = None) -> dict:
+        """
+        Upload a file attachment to a Docmost page.
+
+        Args:
+            file_path: Local path to the file to upload
+            page_id: Target page ID to attach the file to
+            mime_type: Optional MIME type (auto-detected from extension if not provided)
+
+        Returns:
+            Dict with id, fileName, filePath, fileSize, mimeType, and url fields
+        """
+        import mimetypes
+
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        if not mime_type:
+            mime_type, _ = mimetypes.guess_type(str(path))
+            if not mime_type:
+                mime_type = "application/octet-stream"
+
+        self._ensure_token()
+        url = f"{self.base_url}/api/files/upload"
+        headers = {"Authorization": f"Bearer {self.token}"}
+
+        with open(path, "rb") as f:
+            files = {"file": (path.name, f, mime_type)}
+            data = {"pageId": page_id}
+            response = requests.post(
+                url,
+                headers=headers,
+                files=files,
+                data=data,
+                timeout=self.timeout,
+            )
+
+        if response.status_code == 401:
+            self.login()
+            with open(path, "rb") as f:
+                files = {"file": (path.name, f, mime_type)}
+                data = {"pageId": page_id}
+                response = requests.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    files=files,
+                    data=data,
+                    timeout=self.timeout,
+                )
+
+        response.raise_for_status()
+        result = response.json()
+
+        # Attach a convenience url field
+        file_id = result.get("id", "")
+        file_name = result.get("fileName", path.name)
+        result["url"] = f"/api/files/{file_id}/{file_name}"
+
+        return result
+
     def list_spaces(self, page: int = 1, limit: int = 100) -> list[dict]:
         """
         Get list of all spaces.
